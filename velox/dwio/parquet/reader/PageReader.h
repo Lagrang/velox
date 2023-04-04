@@ -16,6 +16,10 @@
 
 #pragma once
 
+#include <glog/logging.h>
+// clang-format off
+#include <velox/dwio/common/ArrowLoggingUndef.inc>
+// clang-format on
 #include <arrow/util/rle_encoding.h>
 #include "velox/dwio/common/BitConcatenation.h"
 #include "velox/dwio/common/DirectDecoder.h"

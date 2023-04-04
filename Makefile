@@ -67,7 +67,11 @@ PYTHON_EXECUTABLE ?= $(shell which python)
 all: release			#: Build the release version
 
 clean:					#: Delete all build artifacts
-	rm -rf $(BUILD_BASE_DIR)
+	#rm -rf $(BUILD_BASE_DIR)
+	#cmake --build $(BUILD_BASE_DIR)/debug --target=clean
+	#make debug EXTRA_CMAKE_FLAGS="-DVELOX_ENABLE_PARQUET=ON -DVELOX_BUILD_TESTING=ON"
+	#TL_DIR="/tpch_1gb/" _build/debug/velox/dwio/parquet/tests/reader/velox_dwio_parquet_reader_test --gtest_filter=ParquetReaderTest.scan
+	rm $(BUILD_BASE_DIR)/debug/CMakeCache.txt
 
 cmake:					#: Use CMake to create a Makefile build system
 	mkdir -p $(BUILD_BASE_DIR)/$(BUILD_DIR) && \

@@ -16,12 +16,25 @@
 
 #include "velox/dwio/parquet/reader/ParquetReader.h"
 #include <arrow/builder.h>
+#include <arrow/c/abi.h>
+#include <arrow/c/bridge.h>
+#include <arrow/record_batch.h>
+#include <arrow/table_builder.h>
+#include <arrow/type.h>
+#include <arrow/type_fwd.h>
+#include <arrow/util/decimal.h>
+#include <arrow/util/macros.h>
+#include <arrow/util/thread_pool.h>
 #include <gtest/gtest.h>
 #include <type/StringView.h>
 #include <type/Type.h>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <string>
+#include "velox/dwio/parquet/reader/ParquetColumnReader.h"
 #include "velox/dwio/parquet/tests/ParquetReaderTestBase.h"
+#include "velox/vector/arrow/Bridge.h"
 
 using namespace facebook::velox;
 using namespace facebook::velox::common;
@@ -200,14 +213,6 @@ TEST_F(ParquetReaderTest, parseIntDecimal) {
   }
 }
 
-#include <arrow/type.h>
-#include <arrow/type_fwd.h>
-#include <arrow/util/decimal.h>
-#include <arrow/util/macros.h>
-#include <arrow/util/thread_pool.h>
-#include <filesystem>
-#include <string>
-#include "velox/dwio/parquet/reader/ParquetColumnReader.h"
 TEST_F(ParquetReaderTest, scan) {
   namespace fs = std::filesystem;
 
@@ -233,9 +238,11 @@ TEST_F(ParquetReaderTest, scan) {
   std::shared_ptr<arrow::internal::ThreadPool> pool =
       *arrow::internal::ThreadPool::Make(threads);
   std::vector<arrow::Future<arrow::internal::Empty>> futures;
+  std::atomic_int64_t rows = 0;
+  std::atomic_int64_t batches = 0;
   for (int i = 0; i < threads; ++i) {
     arrow::Result<arrow::Future<arrow::internal::Empty>> fut =
-        pool->Submit([this, &paths, &mutex]() {
+        pool->Submit([this, &paths, &mutex, &rows, &batches]() {
           while (true) {
             std::unique_lock lock(mutex);
             if (paths.empty()) {
@@ -251,125 +258,16 @@ TEST_F(ParquetReaderTest, scan) {
             rowReaderOpts.setScanSpec(makeScanSpec(reader.rowType()));
             auto rowReader = reader.createRowReader(rowReaderOpts);
 
-            arrow::ArrayVector arrays;
-            arrow::SchemaBuilder schemaBuilder;
-
             auto result = BaseVector::create(reader.rowType(), 1, pool_.get());
             while (rowReader->next(128 * 1024, result) > 0) {
-              auto batch = result->as<RowVector>();
+              ArrowArray arrowArray;
+              ArrowSchema schema;
+              facebook::velox::exportToArrow(result, schema);
+              facebook::velox::exportToArrow(result, arrowArray, pool_.get());
 
-              for (size_t i = 0; i < batch->childrenSize(); i++) {
-                facebook::velox::VectorPtr colVector = batch->childAt(i);
-                std::shared_ptr<const Type> colType =
-                    reader.rowType()->childAt(i);
-                switch (reader.rowType()->childAt(i)->kind()) {
-                  case facebook::velox::TypeKind::INTEGER: {
-                    schemaBuilder.AddField(arrow::field(
-                        reader.rowType()->nameOf(i), arrow::int32(), false));
-
-                    arrow::Int32Builder builder;
-                    builder.Reserve(colVector->size());
-                    auto valsVector = colVector->asFlatVector<int32_t>();
-                    for (size_t j = 0; j < valsVector->size(); j++) {
-                      if (valsVector->isNullAt(j)) {
-                        builder.UnsafeAppendNull();
-                      } else {
-                        builder.UnsafeAppend(valsVector->valueAt(j));
-                      }
-                    }
-                    arrays.emplace_back(*builder.Finish());
-                  } break;
-                  case facebook::velox::TypeKind::BIGINT: {
-                    arrow::Int64Builder builder;
-                    builder.Reserve(colVector->size());
-                    auto valsVector = colVector->asFlatVector<int64_t>();
-                    for (size_t j = 0; j < valsVector->size(); j++) {
-                      if (valsVector->isNullAt(j)) {
-                        builder.UnsafeAppendNull();
-                      } else {
-                        builder.UnsafeAppend(valsVector->valueAt(j));
-                      }
-                    }
-                    arrays.emplace_back(*builder.Finish());
-                  } break;
-                  case facebook::velox::TypeKind::DATE: {
-                    schemaBuilder.AddField(arrow::field(
-                        reader.rowType()->nameOf(i), arrow::date32(), false));
-
-                    arrow::Int32Builder builder;
-                    builder.Reserve(colVector->size());
-                    auto valsVector = colVector->asFlatVector<Date>();
-                    for (size_t j = 0; j < valsVector->size(); j++) {
-                      if (valsVector->isNullAt(j)) {
-                        builder.UnsafeAppendNull();
-                      } else {
-                        builder.UnsafeAppend(valsVector->valueAt(j).days());
-                      }
-                    }
-                    arrays.emplace_back(*builder.Finish());
-                  } break;
-                  case facebook::velox::TypeKind::VARBINARY:
-                  case facebook::velox::TypeKind::VARCHAR: {
-                    arrow::StringBuilder builder;
-                    builder.Reserve(colVector->size());
-                    SimpleVector<facebook::velox::StringView>* valsVector =
-                        colVector->asFlatVector<StringView>();
-                    if (valsVector == nullptr) {
-                      valsVector =
-                          colVector->as<DictionaryVector<StringView>>();
-                    }
-
-                    for (size_t j = 0; j < valsVector->size(); j++) {
-                      if (valsVector->isNullAt(j)) {
-                        builder.AppendNull();
-                      } else {
-                        builder.Append(valsVector->valueAt(j).str());
-                      }
-                    }
-                    arrays.emplace_back(*builder.Finish());
-                  } break;
-                  case facebook::velox::TypeKind::LONG_DECIMAL: {
-                    arrow::Decimal128Builder builder(arrow::decimal128(
-                        colType->asLongDecimal().precision(),
-                        colType->asLongDecimal().scale()));
-                    builder.Reserve(colVector->size());
-                    auto valsVector =
-                        colVector->asFlatVector<UnscaledLongDecimal>();
-                    for (size_t j = 0; j < valsVector->size(); j++) {
-                      if (valsVector->isNullAt(j)) {
-                        builder.UnsafeAppendNull();
-                      } else {
-                        builder.UnsafeAppend(*arrow::Decimal128::FromString(
-                            DecimalUtil::toString(
-                                valsVector->valueAt(j), colType)));
-                      }
-                    }
-                    arrays.emplace_back(*builder.Finish());
-                  } break;
-                  case facebook::velox::TypeKind::SHORT_DECIMAL: {
-                    arrow::Decimal128Builder builder(arrow::decimal128(
-                        colType->asShortDecimal().precision(),
-                        colType->asShortDecimal().scale()));
-                    builder.Reserve(colVector->size());
-                    auto valsVector =
-                        colVector->asFlatVector<UnscaledShortDecimal>();
-                    for (size_t j = 0; j < valsVector->size(); j++) {
-                      if (valsVector->isNullAt(j)) {
-                        builder.UnsafeAppendNull();
-                      } else {
-                        builder.UnsafeAppend(*arrow::Decimal128::FromString(
-                            DecimalUtil::toString(
-                                valsVector->valueAt(j), colType)));
-                      }
-                    }
-                    arrays.emplace_back(*builder.Finish());
-                  } break;
-                  default:
-                    throw std::runtime_error(
-                        std::string(colType->kindName()) +
-                        "type not supported");
-                }
-              }
+              batches++;
+              auto recBatch = *arrow::ImportRecordBatch(&arrowArray, &schema);
+              rows += recBatch->num_rows();
             }
           }
           return arrow::Status::OK();
@@ -383,8 +281,7 @@ TEST_F(ParquetReaderTest, scan) {
     status &= f.status();
   }
   auto end = std::chrono::steady_clock::now();
-  EXPECT_TRUE(!status.ok())
-      << std::chrono::duration_cast<std::chrono::seconds>(end - start).count()
-      << "ms";
-  ;
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(rows, 1500000);
+  EXPECT_EQ(batches, 4812);
 }

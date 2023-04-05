@@ -28,6 +28,7 @@
 #include <arrow/util/decimal.h>
 #include <arrow/util/macros.h>
 #include <arrow/util/thread_pool.h>
+#include <arrow/util/value_parsing.h>
 #include <gtest/gtest.h>
 #include <type/StringView.h>
 #include <type/Type.h>
@@ -302,11 +303,29 @@ TEST_F(ParquetReaderTest, scan) {
                   fields.emplace_back(
                       arrow::field(fieldName, arrow::int32(), true));
                 } else {
-                  partitionValues.emplace_back(
-                      std::make_shared<arrow::StringScalar>(
-                          std::string(eq, folderStr.end())));
-                  fields.emplace_back(
-                      arrow::field(fieldName, arrow::utf8(), true));
+                  arrow::internal::StringConverter<arrow::Date32Type>
+                      date32Converter;
+                  const arrow::Date32Type& typeRef =
+                      *std::dynamic_pointer_cast<arrow::Date32Type>(
+                          arrow::date32());
+                  std::string dateString = std::string(eq, folderStr.end());
+                  arrow::Date32Type::c_type converted = 0;
+                  if (date32Converter.Convert(
+                          typeRef,
+                          dateString.c_str(),
+                          dateString.length(),
+                          &converted)) {
+                    partitionValues.emplace_back(
+                        std::make_shared<arrow::Date32Scalar>(converted));
+                    fields.emplace_back(
+                        arrow::field(fieldName, arrow::date32(), true));
+                  } else {
+                    partitionValues.emplace_back(
+                        std::make_shared<arrow::StringScalar>(
+                            std::string(eq, folderStr.end())));
+                    fields.emplace_back(
+                        arrow::field(fieldName, arrow::utf8(), true));
+                  }
                 }
               }
             }

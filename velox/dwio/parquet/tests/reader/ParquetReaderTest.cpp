@@ -15,10 +15,13 @@
  */
 
 #include "velox/dwio/parquet/reader/ParquetReader.h"
+#include <arrow/array/array_binary.h>
+#include <arrow/array/util.h>
 #include <arrow/builder.h>
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
+#include <arrow/scalar.h>
 #include <arrow/table_builder.h>
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
@@ -28,6 +31,7 @@
 #include <gtest/gtest.h>
 #include <type/StringView.h>
 #include <type/Type.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -240,11 +244,11 @@ TEST_F(ParquetReaderTest, scan) {
                                           : std::thread::hardware_concurrency();
   std::string dirStr(std::getenv("ETL_DIR"));
   EXPECT_FALSE(dirStr.empty());
-  auto path = fs::path(dirStr);
+  auto datasetPath = fs::path(dirStr);
 
   std::vector<fs::path> paths;
   for (const fs::directory_entry& dir_entry :
-       fs::recursive_directory_iterator(path)) {
+       fs::recursive_directory_iterator(datasetPath)) {
     if (dir_entry.is_regular_file() && dir_entry.path().has_extension() &&
         dir_entry.path().extension() == ".parquet") {
       paths.emplace_back(dir_entry.path());
@@ -262,7 +266,13 @@ TEST_F(ParquetReaderTest, scan) {
   std::atomic_int64_t dataSize = 0;
   for (int i = 0; i < threads; ++i) {
     arrow::Result<arrow::Future<arrow::internal::Empty>> fut =
-        pool->Submit([this, &paths, &mutex, &rows, &batches, &dataSize]() {
+        pool->Submit([this,
+                      &paths,
+                      &baseDir = datasetPath,
+                      &mutex,
+                      &rows,
+                      &batches,
+                      &dataSize]() {
           while (true) {
             std::unique_lock lock(mutex);
             if (paths.empty()) {
@@ -271,6 +281,35 @@ TEST_F(ParquetReaderTest, scan) {
             std::filesystem::path filePath = *(paths.end() - 1);
             paths.pop_back();
             lock.unlock();
+
+            arrow::ScalarVector partitionValues;
+            arrow::FieldVector fields;
+            for (auto folder : filePath.lexically_relative(baseDir)) {
+              auto folderStr = folder.string();
+              auto eq =
+                  std::find_if(folderStr.begin(), folderStr.end(), [](char ch) {
+                    return ch == '=';
+                  });
+              if (eq != folderStr.end()) {
+                eq--;
+                auto fieldName = std::string(folderStr.begin(), eq);
+                eq++;
+                eq++;
+                auto parseRes = arrow::Scalar::Parse(
+                    arrow::int32(), std::string(eq, folderStr.end()));
+                if (parseRes.ok()) {
+                  partitionValues.emplace_back(*parseRes);
+                  fields.emplace_back(
+                      arrow::field(fieldName, arrow::int32(), true));
+                } else {
+                  partitionValues.emplace_back(
+                      std::make_shared<arrow::StringScalar>(
+                          std::string(eq, folderStr.end())));
+                  fields.emplace_back(
+                      arrow::field(fieldName, arrow::utf8(), true));
+                }
+              }
+            }
 
             ReaderOptions readerOpts{defaultPool.get()};
             ParquetReader reader = createReader(filePath, readerOpts);
@@ -287,6 +326,13 @@ TEST_F(ParquetReaderTest, scan) {
 
               batches++;
               auto recBatch = *arrow::ImportRecordBatch(&arrowArray, &schema);
+              for (size_t i = 0; i < fields.size(); i++) {
+                recBatch = *recBatch->AddColumn(
+                    recBatch->num_columns(),
+                    fields[i],
+                    *arrow::MakeArrayFromScalar(
+                        *partitionValues[i], recBatch->num_rows()));
+              }
               rows += recBatch->num_rows();
               for (const auto& col : recBatch->columns()) {
                 if (col->data()) {

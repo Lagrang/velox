@@ -309,5 +309,6 @@ TEST_F(ParquetReaderTest, scan) {
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(rows, 0);
   EXPECT_EQ(batches, 0);
-  EXPECT_EQ((dataSize * 1.0 / 1024 * 1024), 0);
+  auto sizeMb = (dataSize * 1.0 / 1024 * 1024);
+  EXPECT_EQ(sizeMb, 0);
 }

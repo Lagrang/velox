@@ -213,6 +213,25 @@ TEST_F(ParquetReaderTest, parseIntDecimal) {
   }
 }
 
+int64_t AccountArray(const std::shared_ptr<arrow::ArrayData>& array) {
+  int64_t bytes = 0;
+  for (const auto& buf : array->buffers) {
+    if (buf) {
+      // Use capacity() instead of size() of buffer to account
+      // the memory consumed by ingester tool.
+      bytes += buf->capacity();
+    }
+  }
+  if (array->dictionary) {
+    bytes += AccountArray(array->dictionary);
+  }
+  for (const auto& childArray : array->child_data) {
+    bytes += AccountArray(childArray);
+  }
+
+  return bytes;
+}
+
 TEST_F(ParquetReaderTest, scan) {
   namespace fs = std::filesystem;
 
@@ -240,9 +259,10 @@ TEST_F(ParquetReaderTest, scan) {
   std::vector<arrow::Future<arrow::internal::Empty>> futures;
   std::atomic_int64_t rows = 0;
   std::atomic_int64_t batches = 0;
+  std::atomic_int64_t dataSize = 0;
   for (int i = 0; i < threads; ++i) {
     arrow::Result<arrow::Future<arrow::internal::Empty>> fut =
-        pool->Submit([this, &paths, &mutex, &rows, &batches]() {
+        pool->Submit([this, &paths, &mutex, &rows, &batches, &dataSize]() {
           while (true) {
             std::unique_lock lock(mutex);
             if (paths.empty()) {
@@ -268,6 +288,11 @@ TEST_F(ParquetReaderTest, scan) {
               batches++;
               auto recBatch = *arrow::ImportRecordBatch(&arrowArray, &schema);
               rows += recBatch->num_rows();
+              for (const auto& col : recBatch->columns()) {
+                if (col->data()) {
+                  dataSize += AccountArray(col->data());
+                }
+              }
             }
           }
           return arrow::Status::OK();
@@ -282,6 +307,7 @@ TEST_F(ParquetReaderTest, scan) {
   }
   auto end = std::chrono::steady_clock::now();
   EXPECT_TRUE(status.ok());
-  EXPECT_EQ(rows, 1500000);
-  EXPECT_EQ(batches, 4812);
+  EXPECT_EQ(rows, 0);
+  EXPECT_EQ(batches, 0);
+  EXPECT_EQ(dataSize * 1.0 / 1024 * 1024, 0);
 }

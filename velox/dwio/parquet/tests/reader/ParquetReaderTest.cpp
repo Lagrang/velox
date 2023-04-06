@@ -37,6 +37,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include "folly/executors/CPUThreadPoolExecutor.h"
+#include "folly/executors/IOThreadPoolExecutor.h"
+#include "folly/executors/ThreadPoolExecutor.h"
+#include "folly/executors/thread_factory/ThreadFactory.h"
 #include "velox/dwio/parquet/reader/ParquetColumnReader.h"
 #include "velox/dwio/parquet/tests/ParquetReaderTestBase.h"
 #include "velox/vector/arrow/Bridge.h"
@@ -243,7 +247,7 @@ TEST_F(ParquetReaderTest, scan) {
   auto threadsStr = std::getenv("THREADS");
   int32_t threads = threadsStr != nullptr ? std::atoi(threadsStr)
                                           : std::thread::hardware_concurrency();
-  auto batchSizeStr = std::getenv("THREADS");
+  auto batchSizeStr = std::getenv("BATCH_SIZE");
   int64_t batchSize =
       threadsStr != nullptr ? std::atoi(batchSizeStr) : 128 * 1024;
   std::string dirStr(std::getenv("ETL_DIR"));
@@ -264,6 +268,8 @@ TEST_F(ParquetReaderTest, scan) {
   std::mutex mutex;
   std::shared_ptr<arrow::internal::ThreadPool> pool =
       *arrow::internal::ThreadPool::Make(threads);
+  auto decodingPool = std::make_shared<folly::CPUThreadPoolExecutor>(threads);
+  auto ioPool = std::make_shared<folly::IOThreadPoolExecutor>(threads);
   std::vector<arrow::Future<arrow::internal::Empty>> futures;
   std::atomic_int64_t rows = 0;
   std::atomic_int64_t batches = 0;
@@ -277,6 +283,8 @@ TEST_F(ParquetReaderTest, scan) {
                       &rows,
                       &batches,
                       &batchSize,
+                      &decodingPool,
+                      &ioPool,
                       &dataSize]() {
           while (true) {
             std::unique_lock lock(mutex);
@@ -338,6 +346,8 @@ TEST_F(ParquetReaderTest, scan) {
             ParquetReader reader = createReader(filePath, readerOpts);
             RowReaderOptions rowReaderOpts;
             rowReaderOpts.setScanSpec(makeScanSpec(reader.rowType()));
+            rowReaderOpts.setDecodingExecutor(decodingPool);
+            rowReaderOpts.setIOExecutor(ioPool);
             auto rowReader = reader.createRowReader(rowReaderOpts);
 
             auto result = BaseVector::create(reader.rowType(), 1, pool_.get());

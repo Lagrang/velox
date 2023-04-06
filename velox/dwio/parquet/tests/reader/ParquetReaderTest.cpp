@@ -243,6 +243,9 @@ TEST_F(ParquetReaderTest, scan) {
   auto threadsStr = std::getenv("THREADS");
   int32_t threads = threadsStr != nullptr ? std::atoi(threadsStr)
                                           : std::thread::hardware_concurrency();
+  auto batchSizeStr = std::getenv("THREADS");
+  int64_t batchSize =
+      threadsStr != nullptr ? std::atoi(batchSizeStr) : 128 * 1024;
   std::string dirStr(std::getenv("ETL_DIR"));
   EXPECT_FALSE(dirStr.empty());
   auto datasetPath = fs::path(dirStr);
@@ -273,6 +276,7 @@ TEST_F(ParquetReaderTest, scan) {
                       &mutex,
                       &rows,
                       &batches,
+                      &batchSize,
                       &dataSize]() {
           while (true) {
             std::unique_lock lock(mutex);
@@ -337,7 +341,7 @@ TEST_F(ParquetReaderTest, scan) {
             auto rowReader = reader.createRowReader(rowReaderOpts);
 
             auto result = BaseVector::create(reader.rowType(), 1, pool_.get());
-            while (rowReader->next(128 * 1024, result) > 0) {
+            while (rowReader->next(batchSize, result) > 0) {
               ArrowArray arrowArray;
               ArrowSchema schema;
               facebook::velox::exportToArrow(result, schema);
